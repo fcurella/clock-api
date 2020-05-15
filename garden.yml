@@ -1,0 +1,173 @@
+kind: Project
+name: clock
+environments:
+  - name: local
+providers:
+  - name: local-kubernetes
+    environments: ["local"]
+variables:
+  djangoEnv:
+    DATABASE_URL: "postgres://postgres:secret@postgres/clock"
+    REDIS_URL: "redis://redis:6379/0"
+    CELERY_BROKER_URL: "redis://redis:6379/0"
+    REDIS_CHANNEL_LAYER_URL: "redis://redis:6379/0"
+    DJANGO_SETTINGS_MODULE: "config.settings.production"
+    DJANGO_SECRET_KEY: "secret"
+    DJANGO_ADMIN_URL: "admin/"
+    DJANGO_ALLOWED_HOSTS: "clock.local.app.garden"
+    DJANGO_SECURE_SSL_REDIRECT: false
+    DJANGO_CSRF_COOKIE_SECURE: false
+    DJANGO_SESSION_COOKIE_SECURE: false
+    DJANGO_DEBUG: true
+    DJANGO_SUPERUSER_USERNAME: admin
+    DJANGO_SUPERUSER_PASSWORD: admin
+    DJANGO_SUPERUSER_EMAIL: admin@example.com
+  nodeEnv:
+    HOST: 0.0.0.0
+---
+kind: Module
+name: staticfiles
+type: persistentvolumeclaim
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+---
+kind: Module
+name: jsbuild
+type: persistentvolumeclaim
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 100Mi
+---
+kind: Module
+name: database
+description: Postgres DB container
+type: container
+image: postgres:12.2-alpine
+services:
+  - name: postgres
+    ports:
+      - name: postgres
+        containerPort: 5432
+    env:
+      POSTGRES_DB: clock
+      POSTGRES_PASSWORD: secret
+---
+kind: Module
+name: queue
+description: Redis container
+type: container
+image: redis:6.0-alpine
+services:
+  - name: redis
+    ports:
+      - name: redis
+        containerPort: 6379
+---
+kind: Module
+name: api
+type: container
+dockerfile: api.Dockerfile
+exclude:
+  - ./frontend
+services:
+  - name: backend
+    command:
+      - daphne
+      - "-b"
+      - "0.0.0.0"
+      - "config.asgi:application"
+    hotReloadArgs:
+      - python
+      - manage.py
+      - runserver
+      - "0.0.0.0:8000"
+    env: ${var.djangoEnv}
+    ports:
+      - name: http
+        containerPort: 8000
+    ingresses:
+      - path: /static
+        port: http
+      - path: /admin
+        port: http
+      - path: /ws
+        port: http
+      - path: /api
+        port: http
+    dependencies:
+      - postgres
+      - redis
+      - staticfiles
+    volumes:
+      - name: "staticfiles"
+        module: staticfiles
+        containerPath: /usr/src/app/staticfiles
+  - name: celery-beat
+    command:
+      - celery
+      - beat
+      - "-A"
+      - config.celery_app
+      - "-l"
+      - info
+    env: ${var.djangoEnv}
+tasks:
+  - name: migrate
+    command:
+      - python
+      - manage.py
+      - migrate
+      - "--no-input"
+    env: ${var.djangoEnv}
+  - name: collectstatic
+    command:
+      - python
+      - manage.py
+      - collectstatic
+      - "--no-input"
+    env: ${var.djangoEnv}
+    volumes:
+      - name: "staticfiles"
+        module: staticfiles
+        containerPath: /usr/src/app/staticfiles
+---
+kind: Module
+name: frontend
+type: container
+dockerfile: frontend.Dockerfile
+services:
+  - name: frontend
+    command:
+      - npm
+      - run
+      - start
+    hotReloadArgs: [npm, run, start]
+    env: ${var.nodeEnv}
+    ports:
+      - name: http
+        containerPort: 5000
+    ingresses:
+      - path: /
+        port: http
+    dependencies:
+      - backend
+    volumes:
+      - name: "jsbuild"
+        module: jsbuild
+        containerPath: /usr/src/app/public/build
+tasks:
+  - name: build
+    command:
+      - npm
+      - run
+      - build
+    env: ${var.nodeEnv}
+    volumes:
+      - name: "jsbuild"
+        module: jsbuild
+        containerPath: /usr/src/app/public/build
